@@ -341,10 +341,10 @@ static GlobalValue *get_string_gv(StringRef str, StringRef name, Module &mod) {
 }
 
 static GlobalValue *get_check_string(Module &mod) {
-  return get_string_gv("llva.assert: %s\n", "llva.format_str.check", mod);
+  return get_string_gv("llva: check %s\n", "llva.format_str.check", mod);
 }
 static GlobalValue *get_ng_string(Module &mod) {
-  return get_string_gv("llva.NG:\n", "llva.format_str.ng", mod);
+  return get_string_gv("llva: assertion failed!\n", "llva.format_str.ng", mod);
 }
 
 static GlobalValue *get_left_string(Module &mod) {

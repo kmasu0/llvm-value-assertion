@@ -60,7 +60,7 @@ int main(int argc, const char **argv) {
   SMDiagnostic err_diag;
   std::unique_ptr<Module> mod = parseIRFile(InputFilename, err_diag, ctx);
   if (!mod) {
-    err_diag.print("llva", WithColor::error(errs(), argv[0]));
+    err_diag.print("llva", errs());
     return 1;
   }
 

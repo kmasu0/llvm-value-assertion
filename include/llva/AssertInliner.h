@@ -1,5 +1,5 @@
-#ifndef LLVA_PASSES_H
-#define LLVA_PASSES_H
+#ifndef LLVA_ASSERTINLINER_H
+#define LLVA_ASSERTINLINER_H
 
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"

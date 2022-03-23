@@ -43,18 +43,19 @@ include("${LLVM_CMAKE_PATH}/LLVMConfig.cmake")
 
 # Add LLVM cmake scripts
 list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_PATH}")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules")
 
 set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/${CMAKE_CFG_INTDIR}/lib${LLVM_LIBDIR_SUFFIX})
 set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/${CMAKE_CFG_INTDIR}/bin)
-set(LLVM_ENABLE_ASSERTIONS ON)
+set(LLVM_BUILD_TOOLS ON)
 
 include(AddLLVM)
 include(HandleLLVMOptions)
+include(AddLLVA)
 
 include_directories("${LLVM_INCLUDE_DIRS}" ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_BINARY_DIR}/include)
 link_directories(${LLVM_LIBRARY_DIRS})
 
 add_subdirectory(src)
-# add_subdirectory(tools)
-# add_subdirectory(runtime)
+add_subdirectory(tools)

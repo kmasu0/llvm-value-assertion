@@ -1,14 +1,12 @@
-#include "llva/passes.h"
+#include "llva/AssertInliner.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/PassManager.h"
-#include "llvm/Passes/PassBuilder.h"
-#include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -63,36 +61,6 @@ PreservedAnalyses AssertInlininer::run(Module &mod,
   return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 } // namespace llva
-
-PassPluginLibraryInfo getLLVMUserPluginInfo() {
-  return {LLVM_PLUGIN_API_VERSION, "LLVA", LLVM_VERSION_STRING,
-          [](PassBuilder &PB) {
-#if LLVM_VERSION_MAJOR > 11
-            PB.registerPipelineStartEPCallback(
-                [](ModulePassManager &MPM, PassBuilder::OptimizationLevel) {
-                  MPM.addPass(llva::AssertInlininer());
-                });
-#else
-            PB.registerPipelineStartEPCallback([](ModulePassManager &MPM) {
-              MPM.addPass(llva::AssertInlininer());
-            });
-#endif
-            PB.registerPipelineParsingCallback(
-                [](StringRef Name, ModulePassManager &MPM,
-                   ArrayRef<PassBuilder::PipelineElement>) {
-                  if (Name == "llva") {
-                    MPM.addPass(llva::AssertInlininer());
-                    return true;
-                  }
-                  return false;
-                });
-          }};
-}
-
-extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
-llvmGetPassPluginInfo() {
-  return getLLVMUserPluginInfo();
-}
 
 static const unsigned WordSizeInBits = 64;
 
@@ -196,23 +164,23 @@ static void inline_assert_body(Function &func, llva::AssertKind kind,
   raw_string_ostream err(buf);
 
   if (func.getReturnType() != Type::getVoidTy(ctx)) {
-    err << func.getName();
-    err << " must return void type!\n";
-    report_fatal_error(err.str());
+    ctx.diagnose(DiagnosticInfoUnsupported(
+        func, "assert function must return void.", func.getSubprogram()));
+    return;
   }
 
   if (func.arg_size() != 2) {
-    err << func.getName();
-    err << " does not have 2 arguments!\n";
-    report_fatal_error(err.str());
+    ctx.diagnose(DiagnosticInfoUnsupported(
+        func, "function does not have 2 arguments.", func.getSubprogram()));
+    return;
   }
 
   Value *lhs = func.getArg(0);
   Value *rhs = func.getArg(1);
   if (lhs->getType() != rhs->getType()) {
-    err << func.getName();
-    err << " arguments do not have the same type!\n";
-    report_fatal_error(err.str());
+    ctx.diagnose(DiagnosticInfoUnsupported(
+        func, "arguments does not have the same type.", func.getSubprogram()));
+    return;
   }
 
   FunctionCallee print_format_fn = get_print_format(mod);

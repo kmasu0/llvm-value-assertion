@@ -1,17 +1,22 @@
 LLVM Value Assertion - llva
 ---------------------------
 
-This is a tool to transform input llvm-ir by inserting llvm ir value assertion codes.
+This is a tool to make it easy to write tests of LLVM IR assembly.
 
-.. code::
+**Assert Inliner**
 
-   declare void llvc.assert.eq.i32(i32, i32)
+   Inserting value assertion codes.
 
-   define dso_local void @func(i32 %0) {
-   bb0:
-     ...
-     call void llvc.assert.eq.i32(i32 %0, i32 10)
-     ...
-   }
+   .. code::
 
-llva creates a function `llvc.assert.eq.i32` body.
+      declare void llvc.assert.eq.i32(i32, i32)
+
+      define dso_local void @func(i32 %0) {
+      bb0:
+        ...
+        call void llvc.assert.eq.i32(i32 %0, i32 10)
+        ...
+      }
+
+   A function `llvc.assert.eq.i32` body is generated after `AssertInliner`.
+

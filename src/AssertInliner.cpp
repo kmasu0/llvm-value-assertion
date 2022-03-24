@@ -14,85 +14,15 @@
 #define DEBUG_TYPE "llva"
 using namespace llvm;
 
-/// Inline assert call.
-static bool inline_assert_call(CallInst &CI, llva::AssertKind Kind,
-                               IRBuilder<> &Builder);
-/// Inline assert function body.
-static void inline_assert_body(Function &func, llva::AssertKind kind,
-                               IRBuilder<> &builder);
-
-static Optional<llva::AssertKind> parse_function_name(const Function &func);
-
-namespace llva {
-PreservedAnalyses AssertInlininer::run(Module &mod,
-                                       ModuleAnalysisManager &mam) {
-  IRBuilder<> builder(mod.getContext());
-  bool changed = false;
-
-  // Create body first.
-  for (Function &func : mod) {
-    Optional<llva::AssertKind> kind_or_none = parse_function_name(func);
-    if (kind_or_none) {
-      inline_assert_body(func, kind_or_none.getValue(), builder);
-      changed = true;
-    }
-  }
-
-  for (Function &func : mod) {
-    for (BasicBlock &block : func) {
-      for (Instruction &inst : block) {
-        if (CallInst *call = dyn_cast<CallInst>(&inst)) {
-          Function *callee_fn = call->getCalledFunction();
-          if (!callee_fn)
-            continue;
-
-          Optional<llva::AssertKind> kind_or_none =
-              parse_function_name(*callee_fn);
-          if (!kind_or_none)
-            continue;
-
-          inline_assert_call(*call, kind_or_none.getValue(), builder);
-          changed = true;
-        }
-      }
-    }
-  }
-
-  return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
-}
-} // namespace llva
-
-static const unsigned WordSizeInBits = 64;
+static const char *AssertFnPrefix = "llva.assert.";
 
 static std::string get_global_tmp_name();
 static std::string get_local_tmp_name();
 static void clear_local_tmp_names();
-
-static Optional<llva::AssertKind> parse_function_name(const Function &func) {
-  StringRef prefix = "llva.";
-  StringRef name = func.getName();
-  if (!name.startswith(prefix) || name.size() <= prefix.size())
-    return None;
-
-  StringRef assert_name = name.drop_front(prefix.size());
-  if (!assert_name.startswith("assert."))
-    return None;
-
-  if (assert_name.startswith("assert.eq"))
-    return llva::AK_Eq;
-  else if (assert_name.startswith("assert.ne"))
-    return llva::AK_Ne;
-  else
-    return None;
-}
-
-static Value *insert_compare(CmpInst::Predicate ipred, CmpInst::Predicate fpred,
-                             Value *lhs, Value *rhs, IRBuilder<> &builder,
-                             raw_ostream &err);
-static void insert_divide_value_for_print(Value *val, IRBuilder<> &builder,
-                                          std::vector<Value *> &dsts);
-
 static GlobalValue *get_string_gv(StringRef str, StringRef name, Module &mod);
+static FunctionCallee get_print_format(Module &mod);
+/// Return "Check: %s\n"
+static GlobalValue *get_check_string(Module &mod);
 
 static inline Value *get_string_i8ptr(GlobalValue *gv, IRBuilder<> &builder) {
   LLVMContext &ctx = gv->getContext();
@@ -101,8 +31,6 @@ static inline Value *get_string_i8ptr(GlobalValue *gv, IRBuilder<> &builder) {
   return builder.CreateGEP(gv->getType()->getPointerElementType(), gv,
                            {zero, zero});
 }
-/// Return "Check: %s\n"
-static GlobalValue *get_check_string(Module &mod);
 static Value *get_check_string(Module &mod, IRBuilder<> &builder) {
   return get_string_i8ptr(get_check_string(mod), builder);
 }
@@ -126,20 +54,81 @@ static GlobalValue *get_format_string(Type *type, Module &mod);
 static Value *get_format_string(Type *type, Module &mod, IRBuilder<> &builder) {
   return get_string_i8ptr(get_format_string(type, mod), builder);
 }
-/// Helper functions
-static void get_format_string_impl(Type *type, raw_ostream &os);
-static FunctionCallee get_print_format(Module &mod);
+static Value *insert_compare(CmpInst::Predicate icmp_pred,
+                             CmpInst::Predicate fcmp_pred, Value *lhs,
+                             Value *rhs, IRBuilder<> &builder,
+                             raw_ostream &err);
+static void insert_divide_value_for_print(Value *val, IRBuilder<> &builder,
+                                          std::vector<Value *> &dsts,
+                                          bool is_signed);
 
-static CmpInst::Predicate selectICmpPredicate(llva::AssertKind kind);
-static CmpInst::Predicate selectFCmpPredicate(llva::AssertKind kind);
+namespace llva {
+CmpInst::Predicate parseICmpPredicate(StringRef pred) {
+  return StringSwitch<CmpInst::Predicate>(pred)
+      .Case("eq", CmpInst::ICMP_EQ)
+      .Case("ne", CmpInst::ICMP_NE)
+      .Case("sgt", CmpInst::ICMP_SGT)
+      .Case("sge", CmpInst::ICMP_SGE)
+      .Case("slt", CmpInst::ICMP_SLT)
+      .Case("sle", CmpInst::ICMP_SLE)
+      .Case("ugt", CmpInst::ICMP_UGT)
+      .Case("uge", CmpInst::ICMP_UGE)
+      .Case("ult", CmpInst::ICMP_ULT)
+      .Case("ule", CmpInst::ICMP_ULE)
+      .Default(CmpInst::BAD_ICMP_PREDICATE);
+}
 
-static bool inline_assert_call(CallInst &call, llva::AssertKind kind,
-                               IRBuilder<> &builder) {
+CmpInst::Predicate parseFCmpPredicate(StringRef pred) {
+  return StringSwitch<CmpInst::Predicate>(pred)
+      .Case("oeq", CmpInst::FCMP_OEQ)
+      .Case("one", CmpInst::FCMP_ONE)
+      .Case("ogt", CmpInst::FCMP_OGT)
+      .Case("oge", CmpInst::FCMP_OGE)
+      .Case("olt", CmpInst::FCMP_OLT)
+      .Case("ole", CmpInst::FCMP_OLE)
+      .Case("ueq", CmpInst::FCMP_UEQ)
+      .Case("une", CmpInst::FCMP_UNE)
+      .Case("ugt", CmpInst::FCMP_UGT)
+      .Case("uge", CmpInst::FCMP_UGE)
+      .Case("ult", CmpInst::FCMP_ULT)
+      .Case("ule", CmpInst::FCMP_ULE)
+      .Default(CmpInst::BAD_FCMP_PREDICATE);
+}
+
+std::pair<llvm::CmpInst::Predicate, llvm::CmpInst::Predicate>
+parseAssertCmpFunctionPredicate(Function &func, bool DefaultOrdered) {
+  StringRef prefix = AssertFnPrefix;
+  StringRef name = func.getName();
+  std::pair<CmpInst::Predicate, CmpInst::Predicate> bad_preds = {
+      CmpInst::BAD_ICMP_PREDICATE, CmpInst::BAD_FCMP_PREDICATE};
+
+  if (!name.startswith(prefix))
+    return bad_preds;
+
+  StringRef pred = name.drop_front(prefix.size()).split('.').first;
+  if (pred == "eq")
+    return {CmpInst::ICMP_EQ,
+            DefaultOrdered ? CmpInst::FCMP_OEQ : CmpInst::FCMP_UEQ};
+  else if (pred == "ne")
+    return {CmpInst::ICMP_NE,
+            DefaultOrdered ? CmpInst::FCMP_ONE : CmpInst::FCMP_UNE};
+
+  Type *type = func.args().begin()->getType();
+  if (type->isIntegerTy())
+    return {parseICmpPredicate(pred), CmpInst::BAD_FCMP_PREDICATE};
+  else if (type->isFloatingPointTy())
+    return {CmpInst::BAD_ICMP_PREDICATE, parseFCmpPredicate(pred)};
+
+  return bad_preds;
+}
+
+bool insertAssertCallPrint(llvm::CallInst &call, llvm::IRBuilder<> &builder) {
+  LLVM_DEBUG(dbgs() << "insert assert call print\n" << call << '\n');
+
   std::string buf;
-  LLVM_DEBUG(dbgs() << "inline assert call\n" << call << '\n');
-
   llvm::raw_string_ostream os(buf);
   call.print(os, true);
+
   Module &mod = *call.getModule();
   Value *call_str = get_string_gv(os.str(), get_global_tmp_name(), mod);
 
@@ -153,8 +142,29 @@ static bool inline_assert_call(CallInst &call, llva::AssertKind kind,
   return true;
 }
 
-static void inline_assert_body(Function &func, llva::AssertKind kind,
-                               IRBuilder<> &builder) {
+Function *getOrCreateAssertCmpFunction(StringRef name,
+                                       CmpInst::Predicate icmp_pred,
+                                       CmpInst::Predicate fcmp_pred,
+                                       Type *arg_type, Module &mod,
+                                       IRBuilder<> &builder) {
+  LLVMContext &ctx = arg_type->getContext();
+
+  FunctionType *fn_type =
+      FunctionType::get(Type::getVoidTy(ctx), {arg_type, arg_type}, false);
+  FunctionCallee callee = mod.getOrInsertFunction(name, fn_type);
+  Function *func = dyn_cast<Function>(callee.getCallee());
+  if (!func)
+    return nullptr;
+
+  generateAssertCmpBody(*func, icmp_pred, fcmp_pred, builder);
+  return func;
+}
+
+bool generateAssertCmpBody(Function &func, CmpInst::Predicate icmp_pred,
+                           CmpInst::Predicate fcmp_pred, IRBuilder<> &builder) {
+  if (!func.isDeclaration())
+    return false;
+
   clear_local_tmp_names();
   LLVM_DEBUG(dbgs() << "inline assert function body\n" << func << '\n');
 
@@ -166,13 +176,13 @@ static void inline_assert_body(Function &func, llva::AssertKind kind,
   if (func.getReturnType() != Type::getVoidTy(ctx)) {
     ctx.diagnose(DiagnosticInfoUnsupported(
         func, "assert function must return void.", func.getSubprogram()));
-    return;
+    return false;
   }
 
   if (func.arg_size() != 2) {
     ctx.diagnose(DiagnosticInfoUnsupported(
         func, "function does not have 2 arguments.", func.getSubprogram()));
-    return;
+    return false;
   }
 
   Value *lhs = func.getArg(0);
@@ -180,7 +190,7 @@ static void inline_assert_body(Function &func, llva::AssertKind kind,
   if (lhs->getType() != rhs->getType()) {
     ctx.diagnose(DiagnosticInfoUnsupported(
         func, "arguments does not have the same type.", func.getSubprogram()));
-    return;
+    return false;
   }
 
   FunctionCallee print_format_fn = get_print_format(mod);
@@ -189,12 +199,13 @@ static void inline_assert_body(Function &func, llva::AssertKind kind,
   // Start insert instructions.
   BasicBlock *entry = BasicBlock::Create(ctx, "entry", &func);
   builder.SetInsertPoint(entry);
-  Value *cmp =
-      insert_compare(selectICmpPredicate(kind), selectFCmpPredicate(kind), lhs,
-                     rhs, builder, err);
+  Value *cmp = insert_compare(icmp_pred, fcmp_pred, lhs, rhs, builder, err);
   BasicBlock *failbb = BasicBlock::Create(ctx, "assert.fail", &func);
   BasicBlock *endbb = BasicBlock::Create(ctx, "assert.end", &func);
-  builder.CreateCondBr(cmp, endbb, failbb);
+  if (cmp)
+    builder.CreateCondBr(cmp, endbb, failbb);
+  else
+    builder.CreateBr(failbb);
 
   builder.SetInsertPoint(failbb);
   // Print "NG:".
@@ -206,19 +217,68 @@ static void inline_assert_body(Function &func, llva::AssertKind kind,
   format_str = get_format_string(type, mod, builder);
   args.push_back(format_str);
   args.push_back(get_left_string(mod, builder));
-  insert_divide_value_for_print(lhs, builder, args);
+  insert_divide_value_for_print(lhs, builder, args,
+                                CmpInst::isSigned(icmp_pred));
   builder.CreateCall(print_format_fn, args);
   // Print "\tright: <values>".
   args.clear();
   args.push_back(format_str);
   args.push_back(get_right_string(mod, builder));
-  insert_divide_value_for_print(rhs, builder, args);
+  insert_divide_value_for_print(rhs, builder, args,
+                                CmpInst::isSigned(icmp_pred));
   builder.CreateCall(print_format_fn, args);
   builder.CreateBr(endbb);
 
   builder.SetInsertPoint(endbb);
   builder.CreateRetVoid();
+
+  return true;
 }
+
+bool inlineAssertCmpIR(llvm::Module &mod, bool DefaultOrdered) {
+  IRBuilder<> builder(mod.getContext());
+
+  bool changed = false;
+  for (Function &func : mod) {
+    if (generateAssertCmpBody(func, builder))
+      changed = true;
+  }
+
+  for (Function &func : mod) {
+    for (BasicBlock &block : func) {
+      for (Instruction &inst : block) {
+        CallInst *call = dyn_cast<CallInst>(&inst);
+        if (!call)
+          continue;
+
+        Function *callee_fn = call->getCalledFunction();
+        if (!callee_fn)
+          continue;
+
+        llvm::CmpInst::Predicate ICmpPred, FCmpPred;
+        if (parseAssertCmpFunctionPredicate(*callee_fn, ICmpPred, FCmpPred,
+                                            DefaultOrdered)) {
+          insertAssertCallPrint(*call, builder);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  return changed;
+}
+} // namespace llva
+
+static const unsigned WordSizeInBits = 64;
+
+static Value *insert_compare(CmpInst::Predicate ipred, CmpInst::Predicate fpred,
+                             Value *lhs, Value *rhs, IRBuilder<> &builder,
+                             raw_ostream &err);
+static void insert_divide_value_for_print(Value *val, IRBuilder<> &builder,
+                                          std::vector<Value *> &dsts);
+
+/// Helper functions
+static void get_format_string_impl(Type *type, raw_ostream &os);
 
 static unsigned NumGlobalNames = 0;
 static std::string get_global_tmp_name() {
@@ -234,13 +294,10 @@ static std::string get_local_tmp_name() {
 }
 static void clear_local_tmp_names() { NumLocalNames = 0; }
 
-static Value *insert_compare(CmpInst::Predicate ipred, CmpInst::Predicate fpred,
-                             Value *lhs, Value *rhs, IRBuilder<> &builder,
+static Value *insert_compare(CmpInst::Predicate icmp_pred,
+                             CmpInst::Predicate fcmp_pred, Value *lhs,
+                             Value *rhs, IRBuilder<> &builder,
                              raw_ostream &err) {
-  assert(CmpInst::isIntPredicate(ipred) && "ipred must be integer predicate");
-  assert(CmpInst::isFPPredicate(fpred) &&
-         "fpred must be floating-point predicate");
-
   if (lhs->getType() != rhs->getType())
     return nullptr;
 
@@ -254,7 +311,8 @@ static Value *insert_compare(CmpInst::Predicate ipred, CmpInst::Predicate fpred,
     for (unsigned I = 0; I != NumElts; ++I) {
       Value *lhs_elt = builder.CreateExtractValue(lhs, I, get_local_tmp_name());
       Value *rhs_elt = builder.CreateExtractValue(rhs, I, get_local_tmp_name());
-      Value *cmp = insert_compare(ipred, fpred, lhs_elt, rhs_elt, builder, err);
+      Value *cmp =
+          insert_compare(icmp_pred, fcmp_pred, lhs_elt, rhs_elt, builder, err);
       if (!cmp)
         return nullptr;
       result = I == 0 ? cmp
@@ -266,21 +324,31 @@ static Value *insert_compare(CmpInst::Predicate ipred, CmpInst::Predicate fpred,
     return result;
   } else if (type->isVectorTy()) {
     Type *elt_type = cast<VectorType>(type)->getElementType();
-    if (elt_type->isIntegerTy() || elt_type->isPointerTy())
-      return builder.CreateICmp(ipred, lhs, rhs, get_local_tmp_name());
-    else if (elt_type->isFloatingPointTy())
-      return builder.CreateFCmp(fpred, lhs, rhs, get_local_tmp_name());
+    if (elt_type->isIntegerTy() || elt_type->isPointerTy()) {
+      if (!CmpInst::isIntPredicate(icmp_pred))
+        return nullptr;
+      return builder.CreateICmp(icmp_pred, lhs, rhs, get_local_tmp_name());
+    } else if (elt_type->isFloatingPointTy()) {
+      if (!CmpInst::isFPPredicate(fcmp_pred))
+        return nullptr;
+      return builder.CreateFCmp(fcmp_pred, lhs, rhs, get_local_tmp_name());
+    }
   } else if (type->isIntegerTy() || type->isPointerTy()) {
-    return builder.CreateICmp(ipred, lhs, rhs, get_local_tmp_name());
+    if (!CmpInst::isIntPredicate(icmp_pred))
+      return nullptr;
+    return builder.CreateICmp(icmp_pred, lhs, rhs, get_local_tmp_name());
   } else if (type->isFloatingPointTy()) {
-    return builder.CreateFCmp(fpred, lhs, rhs, get_local_tmp_name());
+    if (!CmpInst::isFPPredicate(fcmp_pred))
+      return nullptr;
+    return builder.CreateFCmp(fcmp_pred, lhs, rhs, get_local_tmp_name());
   }
 
-  llvm_unreachable("unsupported type");
+  return nullptr;
 }
 
 static void insert_divide_value_for_print(Value *val, IRBuilder<> &builder,
-                                          std::vector<Value *> &dsts) {
+                                          std::vector<Value *> &dsts,
+                                          bool is_signed) {
   Type *type = val->getType();
   LLVMContext &ctx = type->getContext();
 
@@ -290,17 +358,23 @@ static void insert_divide_value_for_print(Value *val, IRBuilder<> &builder,
 
     if (width > WordSizeInBits) {
       unsigned num_words = divideCeil(width, WordSizeInBits);
+      Type *wide_type = Type::getIntNTy(ctx, num_words * WordSizeInBits);
+      Value *ext = is_signed ? builder.CreateSExt(val, wide_type)
+                             : builder.CreateZExt(val, wide_type);
 
       for (unsigned i = 0; i != num_words; ++i) {
-        Value *part = builder.CreateTrunc(val, i64);
+        Value *amt =
+            ConstantInt::get(wide_type, WordSizeInBits * (num_words - i - 1));
+        Value *part = i != num_words - 1 ? builder.CreateLShr(ext, amt) : ext;
+        part = builder.CreateTrunc(part, i64);
         dsts.push_back(part);
-        if (i != num_words - 1)
-          val = builder.CreateLShr(val, 64);
       }
     } else if (width == WordSizeInBits) {
       dsts.push_back(val);
     } else {
-      dsts.push_back(builder.CreateZExt(val, i64));
+      Value *ext = is_signed ? builder.CreateSExt(val, i64)
+                             : builder.CreateZExt(val, i64);
+      dsts.push_back(ext);
     }
   } else if (type->isFloatingPointTy()) {
     dsts.push_back(val);
@@ -348,10 +422,10 @@ static GlobalValue *get_ng_string(Module &mod) {
 }
 
 static GlobalValue *get_left_string(Module &mod) {
-  return get_string_gv("\tleft", "llva.format_str.left", mod);
+  return get_string_gv("left", "llva.format_str.left", mod);
 }
 static GlobalValue *get_right_string(Module &mod) {
-  return get_string_gv("\tright", "llva.format_str.right", mod);
+  return get_string_gv("right", "llva.format_str.right", mod);
 }
 
 static GlobalValue *get_format_string(Type *type, Module &mod) {
@@ -366,7 +440,7 @@ static GlobalValue *get_format_string(Type *type, Module &mod) {
 
   std::string buf;
   raw_string_ostream os(buf);
-  os << "%s: ";
+  os << "\t%5s: ";
   get_format_string_impl(type, os);
   os << '\n';
 
@@ -383,7 +457,7 @@ static void get_format_string_impl(Type *type, raw_ostream &os) {
     unsigned num_words = divideCeil(width, WordSizeInBits);
     os << "0x";
     for (unsigned i = 0; i != num_words; ++i) {
-      os << "%lx";
+      os << "%lx,";
     }
   } else if (type->isFloatingPointTy()) {
     if (type->isFloatTy())
@@ -461,11 +535,4 @@ static FunctionCallee get_print_format(Module &mod) {
   FunctionType *fn_type = FunctionType::get(
       Type::getInt32Ty(ctx), {Type::getInt8Ty(ctx)->getPointerTo()}, true);
   return mod.getOrInsertFunction(name, fn_type);
-}
-
-static CmpInst::Predicate selectICmpPredicate(llva::AssertKind kind) {
-  return kind == llva::AK_Eq ? CmpInst::ICMP_EQ : CmpInst::ICMP_NE;
-}
-static CmpInst::Predicate selectFCmpPredicate(llva::AssertKind kind) {
-  return kind == llva::AK_Eq ? CmpInst::FCMP_OEQ : CmpInst::FCMP_ONE;
 }

@@ -64,9 +64,7 @@ int main(int argc, const char **argv) {
     return 1;
   }
 
-  ModuleAnalysisManager mam;
-  llva::AssertInlininer inliner;
-  inliner.run(*mod, mam);
+  llva::inlineAssertCmpIR(*mod);
 
   bool emit_to_file = true;
   if (OutputFilename.empty()) {
@@ -80,6 +78,7 @@ int main(int argc, const char **argv) {
   if (errcode)
     report_error(errcode.message());
 
+  ModuleAnalysisManager mam;
   PrintModulePass(out->os()).run(*mod, mam);
 
   if (emit_to_file)

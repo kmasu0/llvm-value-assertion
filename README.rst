@@ -38,13 +38,13 @@ Generate test runner.::
   @y = dso_local global float 0x4028333340000000, align 4
 
   define void @llva.run.1() {
-    %lhs = load float, float* @x, align 4
-    %rhs = load float, float* @y, align 4
+    %lhs = load float, ptr @x, align 4
+    %rhs = load float, ptr @y, align 4
     call void @llva.assert.olt.float(float %lhs, float %rhs)
     ret void
   }
 
-  define i32 @main(i32 %args, i8** %argv) {
+  define i32 @main(i32 %args, ptr %argv) {
     %res = call i32 @llva.runtest()
     ret i32 %res
   }

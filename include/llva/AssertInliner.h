@@ -1,9 +1,9 @@
 #ifndef LLVA_ASSERTINLINER_H
 #define LLVA_ASSERTINLINER_H
 
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Instructions.h"
-#include "llvm/IR/Module.h"
+namespace llvm {
+class Module;
+}
 
 namespace llva {
 /// Generate llva.assert.<predicate> functions body and additional codes, and

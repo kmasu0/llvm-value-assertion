@@ -1,15 +1,14 @@
-#include "llva/AssertInliner.h"
+#include "llva/LLVA.h"
 #include "llva/Error.h"
 #include "llva/Passes.h"
-#include "llvm/Passes/PassBuilder.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/PassRegistry.h"
+#include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FileSystem.h"
@@ -30,7 +29,7 @@ static cl::opt<std::string> InputFilename(cl::Positional, cl::cat(LLVACategory),
 static cl::opt<std::string> OutputFilename("o", cl::cat(LLVACategory),
                                            cl::desc("Output filename"),
                                            cl::value_desc("filename"));
-static cl::opt<bool> ExitOnFail("exit-on-fail", cl::init(true),
+static cl::opt<bool> ExitOnFail("exit-on-fail", cl::init(false),
                                 cl::cat(LLVACategory),
                                 cl::desc("Terminate when assertion failed"));
 static cl::opt<bool>
@@ -77,7 +76,7 @@ int main(int argc, const char **argv) {
 
   ModulePassManager MPM;
 
-  llva::addAssertInlinerPass(MPM, ExitOnFail, DefaultOrdered);
+  llva::addAllPasses(MPM, DefaultOrdered, ExitOnFail);
   MPM.run(*M, MAM);
 
   bool EmitFile = true;

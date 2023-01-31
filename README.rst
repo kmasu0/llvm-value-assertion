@@ -38,18 +38,18 @@ Generate test runner.::
   @y = dso_local global float 0x4028333340000000, align 4
 
   define void @llva.run.1() {
-    %lhs = load float, ptr @x, align 4
-    %rhs = load float, ptr @y, align 4
-    call void @llva.assert.oeq.float(float %lhs, float %rhs)
+    %lhs = load float, float* @x, align 4
+    %rhs = load float, float* @y, align 4
+    call void @llva.assert.olt.float(float %lhs, float %rhs)
     ret void
   }
 
-  define i32 @main(i32 %args, ptr %argv) {
+  define i32 @main(i32 %args, i8** %argv) {
     %res = call i32 @llva.runtest()
     ret i32 %res
   }
 
-  declare void @llva.assert.oeq.float(float, float)
+  declare void @llva.assert.olt.float(float, float)
   declare i32 @llva.runtest()
 
   $ llva -o sample2.tmp.ll  sample2.ll
@@ -72,17 +72,20 @@ Assert Functions
 **void llva.assert.<fcmp predicate>.<floaing-point type>(<floaing-point type> %lhs, <floaing-point type> %rhs)**
   Apply `fcmp.<predicate>` to `%lhs` and `%rhs` and assert its result.
 
-Runner Functions
-----------------
+Test Runner Functions
+---------------------
 
-**void llva.test.<any>()**
-  Test function which will be ran from `llva.runtest`\ .
+**void llva.test.<number>()**
+  Test function which will be called from `llva.runtest`\ .
 
 **i32 llva.runtest()**
-  Invoke all tests `llva.test.<any>()` and return number of failurs.
+  Invoke all tests `llva.test.<number>()` and return number of failurs.
 
-**void llva.runtest.fail()**
+Other Functions
+---------------
+
+**void llva.fail()**
   Increment number of test failed. `llva.assert` will call this function when option `--exit-on-fail` is not specified.
 
-**i32 llva.runtest.result()**
-  Return number of call `llva.runtest.fail`\ .
+**i32 llva.result()**
+  Return number of call `llva.fail`\ .

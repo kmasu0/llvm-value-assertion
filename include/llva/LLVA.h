@@ -1,5 +1,5 @@
-#ifndef LLVA_ASSERTINLINER_H
-#define LLVA_ASSERTINLINER_H
+#ifndef LLVA_LLVA_H
+#define LLVA_LLVA_H
 
 namespace llvm {
 class Module;
@@ -8,7 +8,9 @@ class Module;
 namespace llva {
 /// Generate llva.assert.<predicate> functions body and additional codes, and
 /// return true when IR is changed, otherwise return false.
-bool inlineAssertCmps(llvm::Module &M, bool ExitOnFail, bool DefaultOrdered);
-} // namespace llva
+bool inlineAssertCmps(llvm::Module &M, bool DefaultOrdered);
+bool generateRunner(llvm::Module &M);
+bool inlineResult(llvm::Module &M, bool ExitOnFail);
+}
 
 #endif

@@ -5,13 +5,12 @@ project(llva
   LANGUAGES C CXX ASM
   )
 
-option(LLVM_CONFIG "llvm-config command path")
-if (NOT LLVM_CONFIG)
-  set (LLVM_CONFIG "llvm-config")
+if (NOT LLVA_LLVM_CONFIG)
+  set (LLVA_LLVM_CONFIG "llvm-config")
 endif()
 
 execute_process(
-  COMMAND "${LLVM_CONFIG}"
+  COMMAND "${LLVA_LLVM_CONFIG}"
   "--prefix"
   "--bindir"
   "--cmakedir"

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-LLVM_CONFIG=/usr/local/bin/llvm-config
+LLVM_CONFIG="/usr/local/bin/llvm-config"
 BUILD_TYPE=Debug
 INSTALL_DIR=$(pwd -P)
 if [ $# -ne 0 ]; then

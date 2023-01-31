@@ -1,4 +1,5 @@
 #include "llva/AssertInliner.h"
+#include "llva/Error.h"
 #include "llva/Passes.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/IR/IRPrintingPasses.h"
@@ -9,16 +10,17 @@
 #include "llvm/PassRegistry.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/ToolOutputFile.h"
-#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
 #include <memory>
 
 using namespace llvm;
 
-static cl::OptionCategory LLVACategory("LLVA Options");
+static cl::OptionCategory LLVACategory("llva option category");
 
 static cl::opt<std::string> InputFilename(cl::Positional, cl::cat(LLVACategory),
                                           cl::desc("<input LLVM IR file>"),
@@ -26,64 +28,60 @@ static cl::opt<std::string> InputFilename(cl::Positional, cl::cat(LLVACategory),
 static cl::opt<std::string> OutputFilename("o", cl::cat(LLVACategory),
                                            cl::desc("Output filename"),
                                            cl::value_desc("filename"));
-
-LLVM_ATTRIBUTE_NORETURN static void report_error(Twine msg,
-                                                 StringRef filename = "") {
-  SmallString<256> prefix;
-  if (!filename.empty()) {
-    if (filename == "-")
-      filename = "<stdin>";
-    ("'" + Twine(filename) + "':").toStringRef(prefix);
-  }
-  WithColor::error(errs(), "llva") << prefix << msg << "\n";
-  exit(1);
-}
+static cl::opt<bool> ExitOnFail("exit-on-fail", cl::init(true),
+                                cl::cat(LLVACategory),
+                                cl::desc("Terminate when assertion failed"));
+static cl::opt<bool>
+    DefaultOrdered("default-ordered", cl::init(true), cl::cat(LLVACategory),
+                   cl::desc("Use ordered predicate for floating-point "
+                            "comparison in inlining an aggregate value"));
 
 int main(int argc, const char **argv) {
   InitLLVM X(argc, argv);
 
-  std::string buf;
-  raw_string_ostream err_rsos(buf);
-  const char *overview = R"(llvm-value-assertion)";
+  std::string Buf;
+  raw_string_ostream Errs(Buf);
+  const char *Overview = R"(llvm-value-assertion)";
 
   EnableDebugBuffering = true;
-  LLVMContext ctx;
+  LLVMContext Ctx;
 
-  PassRegistry *reg = PassRegistry::getPassRegistry();
-  initializeCore(*reg);
-  initializeTransformUtils(*reg);
-  initializeAnalysis(*reg);
+  PassRegistry *Reg = PassRegistry::getPassRegistry();
+  initializeCore(*Reg);
+  initializeTransformUtils(*Reg);
+  initializeAnalysis(*Reg);
 
   cl::HideUnrelatedOptions({LLVACategory});
-  cl::ParseCommandLineOptions(argc, argv, overview, &err_rsos);
-  auto args = makeArrayRef(argv + 1, argv + argc);
+  cl::ParseCommandLineOptions(argc, argv, Overview, &Errs);
 
-  SMDiagnostic err_diag;
-  std::unique_ptr<Module> mod = parseIRFile(InputFilename, err_diag, ctx);
-  if (!mod) {
-    err_diag.print("llva", errs());
+  SMDiagnostic ErrDiag;
+  std::unique_ptr<Module> M = parseIRFile(InputFilename, ErrDiag, Ctx);
+  if (!M) {
+    ErrDiag.print("llva", errs());
     return 1;
   }
 
-  llva::inlineAssertCmpIR(*mod);
+  ModulePassManager MPM;
+  ModuleAnalysisManager MAM;
+  llva::addAssertInlinerPass(MPM, ExitOnFail, DefaultOrdered);
+  MPM.run(*M, MAM);
 
-  bool emit_to_file = true;
+  bool EmitFile = true;
   if (OutputFilename.empty()) {
     OutputFilename = "-";
-    emit_to_file = false;
+    EmitFile = false;
   }
 
-  std::error_code errcode;
-  sys::fs::OpenFlags flags = sys::fs::OF_Text;
-  auto out = std::make_unique<ToolOutputFile>(OutputFilename, errcode, flags);
-  if (errcode)
-    report_error(errcode.message());
+  std::error_code ErrCode;
+  sys::fs::OpenFlags Flags = sys::fs::OF_Text;
+  auto Out = std::make_unique<ToolOutputFile>(OutputFilename, ErrCode, Flags);
+  if (ErrCode)
+    report_llva_error(ErrCode.message());
 
-  ModuleAnalysisManager mam;
-  PrintModulePass(out->os()).run(*mod, mam);
+  PrintModulePass(Out->os()).run(*M, MAM);
 
-  if (emit_to_file)
-    out->keep();
+  if (EmitFile)
+    Out->keep();
 
   return 0;
 }

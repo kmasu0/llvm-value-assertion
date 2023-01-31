@@ -4,7 +4,8 @@
 #include "llvm/IR/PassManager.h"
 
 namespace llva {
-void addAssertInliner(llvm::ModulePassManager &MPM);
+void addAssertInlinerPass(llvm::ModulePassManager &MPM, bool ExitOnFail,
+                          bool DefaultOrdered);
 }
 
 #endif

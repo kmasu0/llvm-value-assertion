@@ -1,15 +1,15 @@
-#include "llva/AssertInliner.h"
+#include "llva/LLVA.h"
 #include "llva/Error.h"
 #include "llva/Passes.h"
-#include "llvm/Passes/PassBuilder.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/PassRegistry.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FileSystem.h"
@@ -27,10 +27,10 @@ static cl::OptionCategory LLVACategory("llva option category");
 static cl::opt<std::string> InputFilename(cl::Positional, cl::cat(LLVACategory),
                                           cl::desc("<input LLVM IR file>"),
                                           cl::init("-"));
-static cl::opt<std::string> OutputFilename("o", cl::cat(LLVACategory),
-                                           cl::desc("Output filename"),
-                                           cl::value_desc("filename"));
-static cl::opt<bool> ExitOnFail("exit-on-fail", cl::init(true),
+static cl::opt<std::string> OutputFile("o", cl::cat(LLVACategory),
+                                       cl::desc("Output filename"),
+                                       cl::value_desc("filename"));
+static cl::opt<bool> ExitOnFail("exit-on-fail", cl::init(false),
                                 cl::cat(LLVACategory),
                                 cl::desc("Terminate when assertion failed"));
 static cl::opt<bool>
@@ -63,6 +63,18 @@ int main(int argc, const char **argv) {
     return 1;
   }
 
+  bool EmitFile = true;
+  if (OutputFile.empty()) {
+    OutputFile = "-";
+    EmitFile = false;
+  }
+
+  std::error_code ErrCode;
+  sys::fs::OpenFlags Flags = sys::fs::OF_Text;
+  auto Out = std::make_unique<ToolOutputFile>(OutputFile, ErrCode, Flags);
+  if (ErrCode)
+    report_llva_error(ErrCode.message());
+
   LoopAnalysisManager LAM;
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;
@@ -77,22 +89,13 @@ int main(int argc, const char **argv) {
 
   ModulePassManager MPM;
 
-  llva::addAssertInlinerPass(MPM, ExitOnFail, DefaultOrdered);
+  llva::addAllPasses(MPM, DefaultOrdered, ExitOnFail);
   MPM.run(*M, MAM);
 
-  bool EmitFile = true;
-  if (OutputFilename.empty()) {
-    OutputFilename = "-";
-    EmitFile = false;
-  }
 
-  std::error_code ErrCode;
-  sys::fs::OpenFlags Flags = sys::fs::OF_Text;
-  auto Out = std::make_unique<ToolOutputFile>(OutputFilename, ErrCode, Flags);
-  if (ErrCode)
-    report_llva_error(ErrCode.message());
-
-  PrintModulePass(Out->os()).run(*M, MAM);
+  legacy::PassManager Passes;
+  Passes.add(createPrintModulePass(Out->os()));
+  Passes.run(*M);
 
   if (EmitFile)
     Out->keep();

@@ -2,9 +2,10 @@ add_llva_tool(llva
   llva.cpp
 
   LLVM_LINK_LIBS
+    Analysis
     Core
     IRReader
-    Analysis
+    Passes
     TransformUtils
 
   LINK_LIBS

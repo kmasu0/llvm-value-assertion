@@ -1,19 +1,19 @@
 LLVM Value Assertion - llva
----------------------------
+===========================
 
 This is a tool to make it easy to write assertion code of LLVM IR value.
 
-Sample
-******
+Example
+-------
 
 .. code:: console
 
    $ cat sample.ll
-   declare void llvc.assert.eq.i32(i32, i32)
+   declare void llva.assert.eq.i32(i32, i32)
 
    define dso_local void @func(i32 %0) {
    bb0:
-     call void llvc.assert.eq.i32(i32 %0, i32 10)
+     call void llva.assert.eq.i32(i32 %0, i32 10)
      ret void
    }
 
@@ -32,13 +32,16 @@ Sample
      right: 0x9
 
 Assert Functions
-^^^^^^^^^^^^^^^^
+----------------
 
-**void llvc.assert.eq.<type>(<type> %lhs, <type> %rhs)**
+**void llva.assert.eq.<type>(<any type> %lhs, <any type> %rhs)**
+  Apply `icmp.eq` and `fcmp.[ou]eq` to each element of `%lhs` and `%rhs` and assert each result.
 
-**void llvc.assert.ne.<type>(<type> %lhs, <type> %rhs)**
+**void llva.assert.ne.<type>(<any type> %lhs, <any type> %rhs)**
+  Apply `icmp.ne` and `fcmp.[ou]ne` to each element of `%lhs` and `%rhs` and assert each result.
 
-**void llvc.assert.<icmp predicate>.<integer type>(<integer type> %lhs, <integer type> %rhs)**
+**void llva.assert.<icmp predicate>.<integer type>(<integer type> %lhs, <integer type> %rhs)**
+  Apply `icmp.<predicate>` to `%lhs` and `%rhs` and assert its result.
 
-**void llvc.assert.<fcmp predicate>.<floaing-point type>(<floaing-point type> %lhs, <floaing-point type> %rhs)**
-
+**void llva.assert.<fcmp predicate>.<floaing-point type>(<floaing-point type> %lhs, <floaing-point type> %rhs)**
+  Apply `fcmp.<predicate>` to `%lhs` and `%rhs` and assert its result.

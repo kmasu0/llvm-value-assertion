@@ -8,5 +8,5 @@ add_llva_tool(llva
     TransformUtils
 
   LINK_LIBS
-    LLVA
+    llvaAssertInliner
   )

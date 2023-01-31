@@ -1,7 +1,9 @@
 #include "llva/AssertInliner.h"
 #include "llva/Error.h"
 #include "llva/Passes.h"
+#include "llvm/Passes/PassBuilder.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -61,8 +63,20 @@ int main(int argc, const char **argv) {
     return 1;
   }
 
-  ModulePassManager MPM;
+  LoopAnalysisManager LAM;
+  FunctionAnalysisManager FAM;
+  CGSCCAnalysisManager CGAM;
   ModuleAnalysisManager MAM;
+  PassBuilder PB;
+
+  PB.registerModuleAnalyses(MAM);
+  PB.registerCGSCCAnalyses(CGAM);
+  PB.registerFunctionAnalyses(FAM);
+  PB.registerLoopAnalyses(LAM);
+  PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+  ModulePassManager MPM;
+
   llva::addAssertInlinerPass(MPM, ExitOnFail, DefaultOrdered);
   MPM.run(*M, MAM);
 

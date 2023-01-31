@@ -19,8 +19,6 @@ using namespace llvm;
 
 /// Prefix of internal string variable names.
 static constexpr const char *StrPrefix = "llva.str.";
-/// Prefix of internal global variable name.
-static constexpr const char *GlobalTmpPrefix = "llva.global.";
 /// Prefix of internal virtual register name.
 static constexpr const char *LocalTmpPrefix = "llva.t";
 /// Prefix of assert function names.
@@ -28,36 +26,40 @@ static constexpr const char *AssertFnPrefix = "llva.assert.";
 
 // TODO: Change this.
 /// Max size of value printable in printf.
-static const unsigned MaxPrintableSize = 64;
+static const unsigned MaxPrintableSize = 8;
 /// Name of file being processed.
 static StringRef TargetFileName = "<unknown>";
 
 namespace {
 class StringHelper {
   unsigned NumGlobalTmps = 0;
-  std::map<Type *, GlobalValue *> TypeFormatStrs;
+  std::map<Type *, Value *> TypeFormatStrs;
 
 public:
-  std::string createGlobalTmpName();
   std::string createLocalTmpName(unsigned N);
 
-  GlobalValue *getCheckStr(Module &M) {
+  Value *getGlobalTmpStr(StringRef Str, Module &M) {
+    return getGlobalStr(Str, std::to_string(NumGlobalTmps++), M);
+  }
+
+  Value *getCheckStr(Module &M) {
     return getGlobalStr("llva: check %s\n", "check", M);
   }
-  GlobalValue *getNGStr(Module &M) {
+  Value *getNGStr(Module &M) {
     return getGlobalStr("llva: assertion failed!\n", "ng", M);
   }
-  GlobalValue *getLHSStr(Module &M) { return getGlobalStr("left", "lhs", M); }
-  GlobalValue *getRHSStr(Module &M) { return getGlobalStr("right", "rhs", M); }
+  Value *getLHSStr(Module &M) { return getGlobalStr("left", "lhs", M); }
+  Value *getRHSStr(Module &M) { return getGlobalStr("right", "rhs", M); }
 
-  GlobalValue *getTypeFormatStr(Type *T, Module &M);
+  Value *getTypeFormatStr(Type *T, Module &M);
 
   FunctionCallee getFormatStringPrinter(Module &M);
 
-  GlobalValue *getGlobalStr(StringRef Str, StringRef Name, Module &M);
+  Value *getGlobalStr(StringRef Str, StringRef Name, Module &M);
 
 private:
-  void printTypedFormatStr(Type *T, raw_ostream &OS);
+  void printTypedFormatStr(Type *T, raw_ostream &OS, const DataLayout &DL);
+  Value *castToI8Ptr(Constant *C);
 };
 
 class AssertInliner {
@@ -78,12 +80,8 @@ public:
   /// Return icmp and fcmp predicate for the specified assert function.
   std::pair<CmpInst::Predicate, CmpInst::Predicate>
   parseAssertFnName(Function &F);
-  inline bool parseAssertFnName(Function &F, CmpInst::Predicate &ICmpPred,
-                                CmpInst::Predicate &FCmpPred) {
-    std::tie(ICmpPred, FCmpPred) = parseAssertFnName(F);
-    return CmpInst::isIntPredicate(ICmpPred) ||
-           CmpInst::isFPPredicate(FCmpPred);
-  }
+  bool parseAssertFnName(Function &F, CmpInst::Predicate &ICmpPred,
+                         CmpInst::Predicate &FCmpPred);
   /// Return global variable which contains number of the assertion failure.
   GlobalVariable *getAssertFailCounter(Module &M);
   /// Insert call printing assertion failure.
@@ -128,7 +126,7 @@ private:
                    Value *LHS, Value *RHS, IRBuilder<> &Builder,
                    raw_ostream &Err);
   void dividePrintableSize(Value *V, bool Signed, IRBuilder<> &Builder,
-                           std::vector<Value *> &Dsts);
+                           const DataLayout &DL, std::vector<Value *> &Dsts);
 
   std::string createLocalTmpName() {
     return Strings.createLocalTmpName(NumLocalTmps++);
@@ -138,6 +136,8 @@ private:
 
 namespace llva {
 bool inlineAssertCmps(llvm::Module &M, bool ExitOnFail, bool DefaultOrdered) {
+  TargetFileName = M.getSourceFileName();
+
   StringHelper Strings;
   AssertInliner Inliner(Strings, ExitOnFail, DefaultOrdered);
   return Inliner.inlineAsserts(M);
@@ -151,10 +151,10 @@ void set_target_file_name(StringRef FileName) { TargetFileName = FileName; }
   if (!TargetFileName.empty()) {
     if (TargetFileName == "-")
       TargetFileName = "<stdin>";
-    ("'" + Twine(TargetFileName) + "':").toStringRef(Prefix);
+    (Twine(TargetFileName) + ": ").toStringRef(Prefix);
   }
   WithColor::error(errs(), "llva") << Prefix << Msg << '\n'
-                                   << "(at " << File << ':' << Line;
+                                   << "(at " << File << ':' << Line << '\n';
   llvm_unreachable("llva crashed");
 }
 } // namespace llva
@@ -247,6 +247,15 @@ AssertInliner::parseAssertFnName(Function &F) {
   return std::make_pair(ICmpPred, FCmpPred);
 }
 
+bool AssertInliner::parseAssertFnName(Function &F, CmpInst::Predicate &ICmpPred,
+                                      CmpInst::Predicate &FCmpPred) {
+  if (!F.getName().startswith(AssertFnPrefix))
+    return false;
+
+  std::tie(ICmpPred, FCmpPred) = parseAssertFnName(F);
+  return true;
+}
+
 GlobalVariable *AssertInliner::getAssertFailCounter(Module &M) {
   static const char *AssertFailCounterName = "llva.num_assertion_failed";
   Type *type = Type::getInt32Ty(M.getContext());
@@ -263,7 +272,7 @@ void AssertInliner::printCall(CallInst &CI, IRBuilder<> &Builder) {
   raw_string_ostream RSOS(Buf);
   CI.print(RSOS, true);
   Module &M = *CI.getModule();
-  Value *S = Strings.getGlobalStr(RSOS.str(), Strings.createGlobalTmpName(), M);
+  Value *S = Strings.getGlobalTmpStr(RSOS.str(), M);
 
   Builder.SetInsertPoint(&CI);
   Builder.CreateCall(Strings.getFormatStringPrinter(M),
@@ -284,7 +293,7 @@ void AssertInliner::printValue(Value *V, bool LHS, bool Signed,
   std::vector<Value *> Args;
   Args.emplace_back(Strings.getTypeFormatStr(V->getType(), M));
   Args.emplace_back(LHS ? Strings.getLHSStr(M) : Strings.getRHSStr(M));
-  dividePrintableSize(V, Signed, Builder, Args);
+  dividePrintableSize(V, Signed, Builder, M.getDataLayout(), Args);
   Builder.CreateCall(Strings.getFormatStringPrinter(M), Args);
 }
 
@@ -434,32 +443,33 @@ Value *AssertInliner::insertCmp(CmpInst::Predicate ICmpPred,
 
 void AssertInliner::dividePrintableSize(Value *V, bool Signed,
                                         IRBuilder<> &Builder,
+                                        const DataLayout &DL,
                                         std::vector<Value *> &Dsts) {
   Type *T = V->getType();
   LLVMContext &Ctx = T->getContext();
 
   if (auto *IT = dyn_cast<IntegerType>(T)) {
-    unsigned Width = IT->getBitWidth();
-    Type *I64 = Type::getInt64Ty(Ctx);
+    unsigned Size = DL.getTypeAllocSize(IT).getFixedValue();
+    IntegerType *EtT = Type::getIntNTy(Ctx, MaxPrintableSize * 8);
 
-    if (Width > MaxPrintableSize) {
+    if (Size > MaxPrintableSize) {
       // Extend the big value to dividable size, then divide it.
-      unsigned N = divideCeil(Width, MaxPrintableSize);
-      Type *WideT = Type::getIntNTy(Ctx, N * MaxPrintableSize);
+      unsigned N = divideCeil(Size, MaxPrintableSize);
+      Type *WideT = Type::getIntNTy(Ctx, N * EtT->getBitWidth());
       Value *Ext =
           Signed ? Builder.CreateSExt(V, WideT) : Builder.CreateZExt(V, WideT);
 
       for (unsigned i = 0; i != N; ++i) {
-        Value *Amt = ConstantInt::get(WideT, MaxPrintableSize * (N - i - 1));
+        Value *Amt = ConstantInt::get(WideT, EtT->getBitWidth() * (N - i - 1));
         Value *Part = i != N - 1 ? Builder.CreateLShr(Ext, Amt) : Ext;
-        Part = Builder.CreateTrunc(Part, I64);
+        Part = Builder.CreateTrunc(Part, EtT);
         Dsts.push_back(Part);
       }
-    } else if (Width == MaxPrintableSize) {
+    } else if (Size == MaxPrintableSize) {
       Dsts.push_back(V);
     } else {
       Value *Ext =
-          Signed ? Builder.CreateSExt(V, I64) : Builder.CreateZExt(V, I64);
+          Signed ? Builder.CreateSExt(V, EtT) : Builder.CreateZExt(V, EtT);
       Dsts.push_back(Ext);
     }
   } else if (T->isFloatingPointTy()) {
@@ -473,28 +483,31 @@ void AssertInliner::dividePrintableSize(Value *V, bool Signed,
     unsigned N = VT->getNumElements();
 #endif
     for (unsigned i = 0; i != N; ++i) {
-      Value *Et = Builder.CreateExtractElement(V, i);
-      Dsts.push_back(Et);
+      std::vector<Value *> Ets;
+      dividePrintableSize(Builder.CreateExtractValue(V, i), Signed, Builder, DL,
+                          Ets);
+      for (auto *Et : Ets)
+        Dsts.push_back(Et);
     }
   } else if (auto *AT = dyn_cast<ArrayType>(T)) {
     for (unsigned i = 0, e = AT->getNumElements(); i != e; ++i) {
-      Value *Et = Builder.CreateExtractValue(V, i);
-      Dsts.push_back(Et);
+      std::vector<Value *> Ets;
+      dividePrintableSize(Builder.CreateExtractValue(V, i), Signed, Builder, DL,
+                          Ets);
+      for (auto *Et : Ets)
+        Dsts.push_back(Et);
     }
   } else if (auto *ST = dyn_cast<StructType>(T)) {
     for (unsigned i = 0, e = ST->getNumElements(); i != e; ++i) {
-      Value *Et = Builder.CreateExtractValue(V, i);
-      Dsts.push_back(Et);
+      std::vector<Value *> Ets;
+      dividePrintableSize(Builder.CreateExtractValue(V, i), Signed, Builder, DL,
+                          Ets);
+      for (auto *Et : Ets)
+        Dsts.push_back(Et);
     }
   } else {
     llvm_unreachable("unsupported type found");
   }
-}
-
-std::string StringHelper::createGlobalTmpName() {
-  std::string Name = GlobalTmpPrefix;
-  Name += std::to_string(NumGlobalTmps++);
-  return Name;
 }
 
 std::string StringHelper::createLocalTmpName(unsigned N) {
@@ -503,7 +516,7 @@ std::string StringHelper::createLocalTmpName(unsigned N) {
   return Name;
 }
 
-GlobalValue *StringHelper::getTypeFormatStr(Type *T, Module &M) {
+Value *StringHelper::getTypeFormatStr(Type *T, Module &M) {
   auto It = TypeFormatStrs.find(T);
   if (It != TypeFormatStrs.end())
     return It->second;
@@ -514,7 +527,7 @@ GlobalValue *StringHelper::getTypeFormatStr(Type *T, Module &M) {
   raw_string_ostream RSOS(Buf);
 
   RSOS << "\t%5s: ";
-  printTypedFormatStr(T, RSOS);
+  printTypedFormatStr(T, RSOS, M.getDataLayout());
   RSOS << '\n';
 
   Entry = getGlobalStr(RSOS.str(), "type" + std::to_string(N), M);
@@ -530,10 +543,11 @@ FunctionCallee StringHelper::getFormatStringPrinter(Module &M) {
   return M.getOrInsertFunction(Name, FT);
 }
 
-void StringHelper::printTypedFormatStr(Type *T, raw_ostream &OS) {
+void StringHelper::printTypedFormatStr(Type *T, raw_ostream &OS,
+                                       const DataLayout &DL) {
   if (auto *IT = dyn_cast<IntegerType>(T)) {
-    unsigned W = IT->getBitWidth();
-    unsigned N = divideCeil(W, MaxPrintableSize);
+    unsigned Size = DL.getTypeAllocSize(IT);
+    unsigned N = divideCeil(Size, MaxPrintableSize);
     OS << "0x";
     for (unsigned i = 0; i != N; ++i) {
       OS << "%lx,";
@@ -554,7 +568,7 @@ void StringHelper::printTypedFormatStr(Type *T, raw_ostream &OS) {
   } else if (auto *VT = dyn_cast<VectorType>(T)) {
     std::string EtStr;
     raw_string_ostream EtOS(EtStr);
-    printTypedFormatStr(VT->getElementType(), EtOS);
+    printTypedFormatStr(VT->getElementType(), EtOS, DL);
     EtOS.flush();
 
     OS << "<";
@@ -573,7 +587,7 @@ void StringHelper::printTypedFormatStr(Type *T, raw_ostream &OS) {
   } else if (auto *AT = dyn_cast<ArrayType>(T)) {
     std::string EtStr;
     raw_string_ostream EtOS(EtStr);
-    printTypedFormatStr(AT->getElementType(), EtOS);
+    printTypedFormatStr(AT->getElementType(), EtOS, DL);
     EtOS.flush();
 
     OS << "[";
@@ -596,7 +610,7 @@ void StringHelper::printTypedFormatStr(Type *T, raw_ostream &OS) {
         OS << ", ";
 
       EtStr.clear();
-      printTypedFormatStr(ST->getElementType(I), EtOS);
+      printTypedFormatStr(ST->getElementType(I), EtOS, DL);
       OS << EtOS.str();
     }
 
@@ -608,14 +622,25 @@ void StringHelper::printTypedFormatStr(Type *T, raw_ostream &OS) {
   }
 }
 
-GlobalValue *StringHelper::getGlobalStr(StringRef Str, StringRef BaseName,
-                                        Module &M) {
+Value *StringHelper::getGlobalStr(StringRef Str, StringRef BaseName,
+                                  Module &M) {
   LLVMContext &Ctx = M.getContext();
   Constant *Init = ConstantDataArray::getString(Ctx, Str);
   std::string Name = StrPrefix;
   Name += BaseName;
-  return cast<GlobalValue>(M.getOrInsertGlobal(Name, Init->getType(), [&] {
+  auto *GV = cast<GlobalValue>(M.getOrInsertGlobal(Name, Init->getType(), [&] {
     return new GlobalVariable(M, Init->getType(), true,
                               GlobalValue::PrivateLinkage, Init, Name, nullptr);
   }));
+  return castToI8Ptr(GV);
+}
+
+Value *StringHelper::castToI8Ptr(Constant *C) {
+  auto *T = C->getType();
+  assert(T->isPointerTy() && "argument of castToI8Ptr must be pointer!");
+
+  if (T->isOpaquePointerTy())
+    return C;
+  else
+    return ConstantExpr::getBitCast(C, Type::getInt8PtrTy(C->getContext()));
 }

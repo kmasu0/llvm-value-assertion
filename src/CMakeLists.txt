@@ -3,7 +3,7 @@ set(LLVM_LINK_COMPONENTS
   Core
   )
 
-add_llvm_library(LLVA
+add_llvm_library(llvaAssertInliner
   AssertInliner.cpp
   Passes.cpp
   )
